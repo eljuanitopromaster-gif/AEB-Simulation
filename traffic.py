@@ -46,6 +46,11 @@ class RoadFrame:
         d = location - self.origin
         return d.x * self.fwd.x + d.y * self.fwd.y
 
+    def lat_of(self, location):
+        """Lateral respecto del eje del carril inicial del ego [m], + derecha (exacto en tramo recto)."""
+        d = location - self.origin
+        return d.x * self.right.x + d.y * self.right.y
+
     def transform_at(self, s, lat):
         wp = self.wp0.next(s)[0] if s > 0.01 else (self.wp0.previous(-s)[0] if s < -0.01 else self.wp0)
         tf = wp.transform
@@ -71,7 +76,22 @@ class ScriptedActor:
     def half_length(self):
         return self.actor.bounding_box.extent.x
 
+    @property
+    def contrario(self):
+        """Tráfico de ambiente que circula en sentido contrario al ego (viene de frente)."""
+        return self.spec.kind == "vehiculo" and self.spec.sentido == "contrario"
+
+    @property
+    def v_along(self):
+        """Velocidad a lo largo del carril del ego [m/s] (negativa si viene de frente)."""
+        return -self.v if self.contrario else self.v
+
+    def ver_ego(self, t, ego):
+        """Gancho por ciclo para actores que reaccionan a la posición del ego (solo el peatón con disparo)."""
+
     def hold(self, ego_s, ego_half_length, closing_step=0.0):
+        if self.spec.fijo:
+            return
         if self.z is None:
             self.z = self.actor.get_location().z
         if self.spec.gap >= 0:
@@ -81,6 +101,8 @@ class ScriptedActor:
         tf = self.frame.transform_at(s, self.spec.lane * self.frame.lane_width)
         tf.location.z = self.z
         tf.rotation.roll = self.spec.roll
+        if self.contrario:
+            tf.rotation.yaw += 180.0
         self.actor.set_transform(tf)
 
     def start(self):
@@ -106,7 +128,8 @@ class ScriptedActor:
         self.actor.enable_constant_velocity(carla.Vector3D(self.v, 0.0, 0.0))
         lat = lateral_reference(self.spec.lane, self.spec.maneuvers, t, self.frame.lane_width)
         s = self.frame.s_of(self.actor.get_location())
-        steer = self.lat_pid.run_step(self.frame.target(s + max(5.0, 0.5 * self.v), lat))
+        ahead = max(5.0, 0.5 * self.v)
+        steer = self.lat_pid.run_step(self.frame.target(s - ahead if self.contrario else s + ahead, lat))
         self.actor.apply_control(carla.VehicleControl(steer=float(steer)))
 
     def release(self):
@@ -120,20 +143,47 @@ class ScriptedActor:
 class ScriptedWalker(ScriptedActor):
     """Peatón: camina con WalkerControl según sus maniobras "walk" (o hacia adelante desde t = 0)."""
 
+    def __init__(self, spec, actor, frame):
+        super().__init__(spec, actor, frame)
+        self.t_inicio = None       # instante en que se disparó el cruce (si tiene activar_a_m)
+        self.parado = False        # True: llegó a detener_lat_m y se quedó quieto
+
     def start(self):
-        self._walk(self.frame.fwd, self.spec.speed)
+        """Peatón de acera: camina desde ya (adelante o atrás). Peatón que cruza: velocidad 0, queda quieto."""
+        self._walk(self.frame.fwd * (-1.0 if self.spec.sentido == "atras" else 1.0), self.spec.speed)
+
+    def ver_ego(self, t, ego):
+        """Si tiene activar_a_m, empieza a caminar cuando el ego llega a esa distancia (quieto hasta entonces)."""
+        if self.spec.activar_a_m is None or self.t_inicio is not None or self.free:
+            return
+        e_tf = ego.get_transform()
+        f = e_tf.get_forward_vector()
+        d = self.actor.get_location() - e_tf.location
+        along = d.x * f.x + d.y * f.y - ego.bounding_box.extent.x - self.half_length
+        if along <= self.spec.activar_a_m:
+            self.t_inicio = t
 
     def _walk(self, direction, speed):
         self.actor.apply_control(carla.WalkerControl(direction=carla.Vector3D(direction.x, direction.y, 0.0),
                                                      speed=float(speed)))
 
     def step(self, t, dt):
-        if self.free:
+        if self.free or self.parado:
             return
+        if self.spec.activar_a_m is not None:
+            if self.t_inicio is None:
+                return             # espera quieto
+            t = t - self.t_inicio  # los tiempos de las maniobras cuentan desde el disparo
         for m in self.spec.maneuvers:
             if m.kind == "walk" and t >= m.t:
                 f, r = self.frame.fwd, self.frame.right
-                d = {"izquierda": r * -1.0, "derecha": r, "adelante": f}[m.direction]
+                d = {"izquierda": r * -1.0, "derecha": r, "adelante": f, "atras": f * -1.0}[m.direction]
+                if self.spec.detener_lat_m is not None and m.direction in ("izquierda", "derecha"):
+                    lat = self.frame.lat_of(self.actor.get_location())
+                    if (lat <= self.spec.detener_lat_m) if m.direction == "izquierda" else (lat >= self.spec.detener_lat_m):
+                        self.parado = True          # se queda parado en el carril
+                        self._walk(f, 0.0)
+                        return
                 self._walk(d, m.speed)
 
     def release(self):
@@ -178,6 +228,23 @@ def in_path_threat(ego, actors):
             v, acc = a.get_velocity(), a.get_acceleration()
             best = (gap, v.x * f.x + v.y * f.y + v.z * f.z, acc.x * f.x + acc.y * f.y + acc.z * f.z, sa.spec.name)
     return best
+
+
+def peaton_cerca(ego, actors, margen=1.2, alcance=40.0):
+    """True si algún peatón está delante (o a punto de cruzar) dentro del ancho del ego más un margen [m]."""
+    e_tf = ego.get_transform()
+    f, r = e_tf.get_forward_vector(), e_tf.get_right_vector()
+    e_c = e_tf.transform(ego.bounding_box.location)
+    medio_ancho = ego.bounding_box.extent.y
+    for sa in actors:
+        if sa.spec.kind != "peaton":
+            continue
+        p = sa.actor.get_location()
+        along = (p.x - e_c.x) * f.x + (p.y - e_c.y) * f.y
+        lat = (p.x - e_c.x) * r.x + (p.y - e_c.y) * r.y
+        if -3.0 < along < alcance and abs(lat) < medio_ancho + margen:
+            return True
+    return False
 
 
 def maneuver_events(scenario):

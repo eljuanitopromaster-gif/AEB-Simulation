@@ -11,8 +11,18 @@ import numpy as np
 import config as C
 from aeb_core.interfaces import Detections, EgoState
 
-# Permite reutilizar los controladores de PythonAPI/carla/agents
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "PythonAPI", "carla"))
+# Permite reutilizar los controladores de PythonAPI/carla/agents (de la carpeta de CARLA, config.CARLA_ROOT)
+_PYTHONAPI = os.path.join(C.CARLA_ROOT, "PythonAPI", "carla")
+if os.path.isdir(os.path.join(_PYTHONAPI, "agents")):
+    sys.path.insert(0, _PYTHONAPI)
+else:
+    try:
+        import agents  # noqa: F401  (ya está en PYTHONPATH)
+    except ImportError:
+        raise ImportError(
+            f"No encuentro los controladores de CARLA (PythonAPI\\carla\\agents) en {C.CARLA_ROOT}. "
+            "Define la variable de entorno CARLA_ROOT con la carpeta de CARLA 0.9.16 (la que tiene CarlaUE4.exe), "
+            "por ejemplo:  set CARLA_ROOT=C:\\CARLA_0.9.16") from None
 
 
 def connect():
@@ -61,6 +71,14 @@ class SensorQueue:
 
 def start_waypoint(world):
     return world.get_map().get_waypoint(carla.Location(*C.START_LOCATION))
+
+
+def waypoint_en_paso_peatonal(world, distancia_m):
+    """Punto de partida del ego tal que un paso peatonal recto del mapa queda `distancia_m` m adelante."""
+    import paso_peatonal
+    wp0, info = paso_peatonal.buscar(world.get_map(), distancia_m)
+    print(f"  Mapa {world.get_map().name.split('/')[-1]}: {info}")
+    return wp0
 
 
 def spawn_vehicle(world, blueprint_id, waypoint, ahead=0.0, role="vehicle"):
@@ -119,6 +137,29 @@ def apply_physics(vehicle, physics):
             w.max_brake_torque = float(physics["max_brake_torque_nm"])
     pc.wheels = wheels
     vehicle.apply_physics_control(pc)
+
+
+def aplicar_clima(world, ego, nombre):
+    """Pone el clima de C.CLIMAS en el mundo y escala la fricción de las llantas del ego por su agarre.
+    Devuelve lo aplicado para el meta.json."""
+    clima = C.CLIMAS[nombre]
+    if clima.get("preset"):
+        weather = getattr(carla.WeatherParameters, clima["preset"])
+    else:
+        weather = carla.WeatherParameters.ClearNoon
+        for k, v in clima["parametros"].items():
+            setattr(weather, k, v)
+    world.set_weather(weather)
+    pc = ego.get_physics_control()
+    wheels = pc.wheels
+    antes = [w.tire_friction for w in wheels]
+    for w in wheels:
+        w.tire_friction = w.tire_friction * clima["agarre"]
+    pc.wheels = wheels
+    ego.apply_physics_control(pc)
+    return {"nombre": nombre, "texto": clima["texto"], "agarre": clima["agarre"],
+            "preset": clima.get("preset"), "parametros": clima.get("parametros"),
+            "tire_friction_antes": antes, "tire_friction_despues": [w.tire_friction for w in ego.get_physics_control().wheels]}
 
 
 def lane_keep_waypoint(carla_map, vehicle):
@@ -183,7 +224,8 @@ def radar_detections(radar_data):
 def ego_state(vehicle):
     """Estado del actor -> entrada del núcleo. El cabeceo de CARLA es positivo con la nariz arriba."""
     return EgoState(speed=forward_speed(vehicle), accel=forward_accel(vehicle),
-                    pitch=math.radians(vehicle.get_transform().rotation.pitch))
+                    pitch=math.radians(vehicle.get_transform().rotation.pitch),
+                    yaw_rate=math.radians(vehicle.get_angular_velocity().z))   # CARLA da [°/s]
 
 
 def physics_summary(vehicle):

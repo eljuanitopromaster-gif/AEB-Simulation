@@ -4,8 +4,22 @@ __pycache__/
 .venv/
 venv/
 
-# Simulation output (≈1.4 GB of recordings/logs)
+# Simulation output (videos, logs, gráficas): se generan al correr los ensayos
 results/
+
+# Lo que guarda sola la ventana del pedal al cerrarse
+Pedal_C5E_Posicion/resultados/
+Pedal_C5E_Posicion/vista_previa_LEON.png
+
+# Modelo anterior del pedal (Profile Torque): el proyecto usa Pedal_C5E_Posicion
+Pedal_Nanotec_Torque/
+
+# Paquetes para Overleaf (se regeneran)
+diagramas/seccion_ieee/*.zip
+
+# Documentos personales / de trabajo
+AEB_IEEE_Copy_.pdf
+contexto_proyecto_AEB.md
 
 # Third-party reference papers (not ours to redistribute)
 2108.02403v2.pdf

@@ -25,10 +25,11 @@ VARIANT_TEXT = {  # (texto, color BGR)
 }
 
 
-def draw_hud(img, inset, sc, variant, row, n_actors, collided, verdict=None):
+def draw_hud(img, inset, sc, variant, row, n_actors, collided, verdict=None, clima=None):
     h, w = img.shape[:2]
+    con_clima = bool(clima and clima["nombre"] != "despejado")
     overlay = img.copy()
-    cv2.rectangle(overlay, (10, 10), (480, 296), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (10, 10), (480, 322 if con_clima else 296), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.65, img, 0.35, 0, img)
 
     def text(s, y, color=(255, 255, 255), scale=0.6, thick=1):
@@ -57,6 +58,8 @@ def draw_hud(img, inset, sc, variant, row, n_actors, collided, verdict=None):
     cv2.rectangle(img, (120, y), (120 + int(3.4 * val), y + 18), (40, 40, 230), -1)
     cv2.putText(img, f"{val:3.0f}%", (410, y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     text(f"Esperado: {'frenar' if sc.expect_brake else 'NO frenar'}", 284, (200, 200, 200), 0.5)
+    if con_clima:
+        text(f"Clima: {ascii_text(clima['texto'])} (agarre x{clima['agarre']:g})", 310, (255, 220, 120), 0.45)
 
     if inset is not None:
         ih, iw = inset.shape[:2]
@@ -97,8 +100,9 @@ def draw_norm_banner(img, sc, verdict):
         put(f"RESULTADO: {txt}", y0 + 102, color, 0.7, 2)
 
 
-def draw_schematic(frame, ego, scripted, radar, perception, threat_name):
-    """Vista superior centrada en el ego: carriles, vehículos, corredor del radar y detecciones."""
+def draw_schematic(frame, ego, scripted, radar, perception, threat_name, crossing=None):
+    """Vista superior centrada en el ego: carriles, vehículos, corredor del radar y detecciones.
+    crossing: CrossingPredictor; marca con un anillo rojo y una flecha el objeto que se predice que cruzará."""
     S = C.SCHEMATIC
     W, H = S["width"], S["height"]
     lat_min, lat_max = S["lat_min"], S["lat_max"]
@@ -167,6 +171,20 @@ def draw_schematic(frame, ego, scripted, radar, perception, threat_name):
         us, vs = (lat - lat_min) * kx, (S["ahead"] - (s - ego_s)) * ky
         for u, v, inl in zip(us, vs, perception.points_in_lane):
             cv2.circle(img, (int(u), int(v)), 3 if inl else 2, (0, 230, 255) if inl else (230, 170, 100), -1)
+
+    # Predicción de cruce
+    am = crossing.amenaza if crossing else None
+    if am is not None:
+        def to_px(x, y):
+            wx, wy = rl.x + x * rf.x + y * rr.x, rl.y + x * rf.y + y * rr.y
+            dx, dy = wx - o.x, wy - o.y
+            s, lat = dx * fwd.x + dy * fwd.y, dx * right.x + dy * right.y
+            return int((lat - lat_min) * kx), int((S["ahead"] - (s - ego_s)) * ky)
+        u, v = to_px(am.x_near, am.y)
+        ue, ve = to_px(am.x_near, am.y + am.vy_ground * 1.0)     # hacia dónde va en 1 s
+        cv2.circle(img, (u, v), 9, (0, 0, 255), 2)
+        cv2.arrowedLine(img, (u, v), (ue, ve), (0, 0, 255), 2, tipLength=0.35)
+        cv2.putText(img, "cruce", (u + 10, v - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
 
     # Escala y título
     for d in range(0, S["ahead"] + 1, 10):

@@ -35,6 +35,7 @@ class EgoState:
     accel: float                    # [m/s²], nan si no llega
     pitch: float = 0.0              # cabeceo [rad], negativo con la nariz hacia abajo
     driver_override: bool = False   # el conductor retoma el control
+    yaw_rate: float = 0.0           # [rad/s], positivo girando a la derecha
 
     def is_valid(self):
         return math.isfinite(self.speed) and math.isfinite(self.pitch)
@@ -54,3 +55,4 @@ class AebOutput:
     target_speed: float     # [m/s], nan sin objetivo
     target_accel: float     # [m/s²], nan sin objetivo
     fault: str = ""         # "", "radar", "lider" o "ego": entrada faltante o vencida
+    cruce: bool = False     # el objetivo es un objeto que se predice que cruzará (aún fuera del carril)

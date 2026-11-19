@@ -11,8 +11,8 @@ import sys
 import numpy as np
 
 import config as C
-from aeb_core import (AebPipeline, Detections, EgoState, LeadState, LeadTracker, RadarTarget, RequiredDecelAEB,
-                      StagedTTCAEB)
+from aeb_core import (AebPipeline, CrossingPredictor, Detections, EgoState, LeadState, LeadTracker, RadarTarget,
+                      RequiredDecelAEB, StagedTTCAEB)
 from aeb_core.logic import ALERTA, DETENIDO, FRENADO_PARCIAL, FRENADO_TOTAL, FRENANDO, INACTIVO, required_deceleration
 
 ok = True
@@ -280,6 +280,111 @@ check("Demanda = BTN × 100 mientras frena y 100 % detenido",
       all(abs(dm - 100.0 * b) < 1e-9 for s, dm, b in pares if s == FRENANDO) and st == DETENIDO and demand == 100.0
       and any(s == FRENANDO for s, _, _ in pares),
       f"{sum(s == FRENANDO for s, _, _ in pares)} ciclos frenando")
+
+# Predicción de cruce
+def scan_objects(objs, v_ego=0.0, mount_z=C.RADAR["mount_z"], height=1.0):
+    """Objetos pequeños en el marco del radar: 4 detecciones cada uno, a `height` m del piso.
+    objs: (x, y) o (x, y, vx, vy) con la velocidad del objeto respecto del piso [m/s].
+    Doppler = velocidad relativa proyectada en la línea de vista (negativo si se acerca)."""
+    depth, azi, alt, vel = [], [], [], []
+    for obj in objs:
+        x, y = obj[:2]
+        vxg, vyg = obj[2:] if len(obj) == 4 else (0.0, 0.0)
+        if x < 1.0:
+            continue
+        for dx, dy in ((0.0, -0.15), (0.0, 0.15), (0.2, -0.1), (0.2, 0.1)):
+            d = math.hypot(x + dx, y + dy)
+            az, el = math.atan2(y + dy, x + dx), math.asin((height - mount_z) / d)
+            depth.append(d)
+            azi.append(az)
+            alt.append(el)
+            vel.append(((vxg - v_ego) * math.cos(az) + vyg * math.sin(az)) * math.cos(el))
+    return Detections(np.array(depth, float), np.array(azi), np.array(alt), np.array(vel))
+
+
+def crossing_run(x0, y0, vy, v_ego, steps=20, dt=0.05, vx=0.0):
+    """Objeto que se mueve respecto del piso a (vx, vy) [m/s]; devuelve el predictor y si marcó amenaza."""
+    cp = CrossingPredictor(C.PREDICCION_CRUCE, C.PERCEPTION["lane_half_width"], C.RADAR["mount_z"],
+                           C.RADAR["min_range"], C.PERCEPTION["min_height"], C.PERCEPTION["max_height"])
+    hist = []
+    for k in range(steps):
+        cp.update(k * dt, scan_objects([(x0 - (v_ego - vx) * k * dt, y0 + vy * k * dt, vx, vy)], v_ego), v_ego)
+        hist.append(cp.amenaza is not None)
+    return cp, hist
+
+
+cp, hist = crossing_run(30.0, 4.6, -1.39, 8.33)
+check("Cruce: peatón que camina hacia el carril → amenaza antes de entrar",
+      any(hist) and cp.amenaza is not None and abs(cp.amenaza.vy_ground + 1.39) < 0.3 and abs(cp.amenaza.y) > 1.6,
+      f"desde el ciclo {hist.index(True) if any(hist) else '-'}, vy {cp.amenaza.vy_ground if cp.amenaza else math.nan:+.2f} m/s")
+cp, hist = crossing_run(30.0, -4.6, 1.39, 8.33)
+check("Cruce: también desde la izquierda", any(hist))
+cp, hist = crossing_run(30.0, 4.0, 0.0, 8.33, vx=1.25)
+check("Banqueta: peatón que camina en paralelo (mismo sentido) → no es amenaza", not any(hist))
+cp, hist = crossing_run(30.0, 4.0, 0.0, 8.33, vx=-1.25)
+check("Banqueta: peatón que camina en paralelo (sentido contrario) → no es amenaza", not any(hist))
+cp, hist = crossing_run(30.0, 3.0, 1.39, 8.33)
+check("Peatón que se aleja del carril → no es amenaza", not any(hist))
+cp, hist = crossing_run(40.0, 2.5, -1.39, 4.0)
+check("Cruza y sale del carril mucho antes de que llegue el ego → no es amenaza", not any(hist))
+cp, hist = crossing_run(30.0, 4.6, -1.39, 8.33, steps=4)
+check("Recién visto (menos de edad_min ciclos) → aún no predice", not any(hist))
+# objeto quieto (auto estacionado) cuya posición aparente "camina" hacia el carril: su Doppler propio es 0
+cp, hist = crossing_run(30.0, 3.5, 0.0, 8.33)
+cp2 = CrossingPredictor(C.PREDICCION_CRUCE, C.PERCEPTION["lane_half_width"], C.RADAR["mount_z"],
+                        C.RADAR["min_range"], C.PERCEPTION["min_height"], C.PERCEPTION["max_height"])
+deriva = []
+for k in range(20):
+    x_rel = 30.0 - 8.33 * k * 0.05
+    cp2.update(k * 0.05, scan_objects([(x_rel, 3.5 - 0.8 * k * 0.05)], 8.33), 8.33)   # deriva aparente 0.8 m/s
+    deriva.append(cp2.amenaza is not None)
+check("Auto estacionado (Doppler propio 0) que parece acercarse → no es amenaza", not any(hist) and not any(deriva))
+# con giro del ego: un peatón quieto parece moverse de lado; la compensación lo deja quieto
+cp = CrossingPredictor(C.PREDICCION_CRUCE, C.PERCEPTION["lane_half_width"], C.RADAR["mount_z"],
+                       C.RADAR["min_range"], C.PERCEPTION["min_height"], C.PERCEPTION["max_height"])
+w, giro_hist = 0.06, []
+for k in range(20):
+    x_rel = 30.0 - 8.33 * k * 0.05
+    cp.update(k * 0.05, scan_objects([(x_rel, 3.5 - w * x_rel * k * 0.05, 0.0, -0.3)], 8.33), 8.33, yaw_rate=w)
+    giro_hist.append(cp.amenaza is not None)
+check("Ego girando: peatón casi quieto al costado no se toma como cruce", not any(giro_hist))
+
+
+def ped_loop(prediccion, v0=8.33, x0=30.0, y0=4.6, vy=-1.39, t_cruza=0.0, t_max=8.0):
+    """Lazo cerrado (actuador ideal): el peatón cruza y se queda en medio del carril.
+    Devuelve (distancia mínima en el carril, distancia al empezar a frenar, desaceleración máxima)."""
+    pl = AebPipeline.from_config(C, logic="btn", prediccion_cruce=prediccion)
+    v, s, t, a, t_brake, x_brake, a_max = v0, 0.0, 0.0, 0.0, None, None, 0.0
+    gap_min = math.inf
+    while t < t_max and v > 0.05:
+        y = y0 if t < t_cruza else max(0.0, y0 + vy * (t - t_cruza))
+        x = x0 - s
+        if abs(y) < 1.0:
+            gap_min = min(gap_min, x)
+            if x <= 0.0:
+                break
+        pl.on_ego(t, EgoState(v, -a))
+        moving = vy < 0 and y > 0.0 and t >= t_cruza
+        pl.on_radar(t, scan_objects([(x, y, 0.0, vy if moving else 0.0)], v))
+        out = pl.tick(t)
+        if out.state == FRENANDO and t_brake is None:
+            t_brake, x_brake = t, x
+        a = out.d_cmd if out.state in (FRENANDO, DETENIDO) else 0.0
+        if v > 2.0:
+            a_max = max(a_max, a)      # en marcha (sin el último metro ni la retención al detenerse)
+        s += v * 0.05
+        v = max(v - a * 0.05, 0.0)
+        t += 0.05
+    return gap_min, x_brake, a_max
+
+
+g_sin, xb_sin, a_sin = ped_loop(False, x0=24.0)
+g_con, xb_con, a_con = ped_loop(True, x0=24.0)
+check("Niño que cruza tarde a 30 km/h: sin predicción frena tarde y a fondo",
+      xb_sin is not None and g_sin > 0, f"freno a {xb_sin:.1f} m, {a_sin:.1f} m/s², queda a {g_sin:.2f} m")
+check("Con predicción: frena antes, más suave y sin tocarlo",
+      xb_con is not None and xb_con > xb_sin + 3 and a_con < 0.7 * a_sin and g_con > 0,
+      f"freno a {xb_con:.1f} m, {a_con:.1f} m/s², queda a {g_con:.2f} m")
 
 check("El núcleo no carga CARLA ni ROS", not {"carla", "rclpy"} & set(sys.modules))
 

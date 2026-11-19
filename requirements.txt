@@ -1,0 +1,8 @@
+# Librerías de Python del proyecto (Python 3.12, Windows).
+# El paquete "carla" NO va aquí: se instala desde la carpeta de CARLA 0.9.16
+# (PythonAPI\carla\dist\carla-0.9.16-cp312-cp312-win_amd64.whl); instalar.bat lo hace solo.
+# Versiones con las que se probó: numpy 2.x, opencv-python 5.0, pandas 3.1, matplotlib 3.11.
+numpy>=1.26
+opencv-python>=4.8
+pandas>=2.1
+matplotlib>=3.8

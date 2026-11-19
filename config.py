@@ -1,3 +1,9 @@
+import os
+
+# Carpeta de CARLA 0.9.16 (la que tiene CarlaUE4.exe y PythonAPI\). Se toma de la variable de entorno CARLA_ROOT;
+# si no está definida, se supone que este proyecto está dentro de la carpeta de CARLA.
+CARLA_ROOT = os.environ.get("CARLA_ROOT") or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 # Simulación
 HOST = "localhost"
 PORT = 2000
@@ -8,6 +14,20 @@ RUNUP_STABLE_TIME = 1.0       # [s]
 RUNUP_SPEED_TOL = 0.5         # [m/s]
 
 START_LOCATION = (9.5, 220.0, 0.5)  # (x, y, z) [m]
+
+# Clima (--clima). En CARLA el clima solo cambia la imagen: no cambia el agarre ni el radar.
+# Para que se note en el frenado, "agarre" escala la fricción de las llantas del ego (SUPUESTO:
+# asfalto mojado ~0.6-0.7 del seco; encharcado ~0.5). La lógica AEB no se entera del clima:
+# sigue suponiendo D_max = 6.8 m/s². El líder y los peatones no usan fricción (velocidad programada).
+CLIMAS = {
+    "despejado": {"texto": "Despejado, piso seco", "agarre": 1.0, "preset": "ClearNoon"},
+    "lluvia": {"texto": "Lluvia, piso mojado", "agarre": 0.7, "preset": "MidRainyNoon"},
+    "niebla": {"texto": "Niebla densa, piso humedo", "agarre": 0.85, "preset": None,
+               "parametros": {"cloudiness": 100.0, "precipitation": 0.0, "precipitation_deposits": 20.0,
+                              "wetness": 60.0, "fog_density": 85.0, "fog_distance": 5.0, "fog_falloff": 1.0,
+                              "sun_altitude_angle": 15.0, "wind_intensity": 10.0}},
+    "tormenta_noche": {"texto": "Tormenta de noche, piso encharcado", "agarre": 0.5, "preset": "HardRainNight"},
+}
 
 TARGET_BLUEPRINT = "vehicle.lincoln.mkz_2020"   # vehículo líder
 
@@ -41,6 +61,28 @@ PERCEPTION = {
     "new_track_jump": 2.5,      # [m]
     "a_lead_limits": (-10.0, 5.0),  # [m/s²]
     "a_lead_alpha": 0.3,
+}
+
+# Predicción de cruce (aeb_core/crossing.py): objetos al costado que caminan hacia el carril
+PREDICCION_CRUCE = {
+    "activa": True,
+    "ancho_vigilancia": 6.0,    # [m] a cada lado del eje del radar (el corredor del carril es lane_half_width)
+    "alcance": 45.0,            # [m] hacia adelante
+    "eps_cluster": 0.6,         # [m] puntos más cercanos que esto son el mismo objeto
+    "percentil_borde": 10,      # [%] posición lateral = borde del objeto del lado del carril
+    "doppler_min": 0.08,        # [m/s] Doppler propio mínimo para considerar que un punto se mueve
+                                #   (un objeto quieto da 0 ± 0.02 en CARLA; un niño que cruza, -0.13 o más)
+    "min_puntos": 1,
+    "max_puntos": 400,          # tope de puntos por ciclo (los más cercanos)
+    "gate": 1.2,                # [m] distancia máxima para asociar un objeto entre ciclos
+    "ab_alpha": 0.35,           # filtro α-β de posición
+    "ema_doppler": 0.6,         # filtro de la velocidad de cierre (Doppler), como PERCEPTION["ema_alpha"]
+    "edad_min": 6,              # ciclos de seguimiento antes de predecir (0.3 s)
+    "max_perdidos": 3,          # ciclos sin verlo antes de olvidarlo
+    "v_lat_min": 0.5,           # [m/s] por debajo: no se mueve hacia el carril (banqueta, quieto)
+    "v_lat_max": 5.0,           # [m/s] por encima: salto del agrupamiento, no un peatón
+    "margen_s": 0.5,            # [s] holgura entre la llegada del ego y la entrada/salida del objeto
+    "retencion": 4,             # ciclos que se mantiene la amenaza si la predicción parpadea
 }
 
 AEB_LOGIC = "btn"               # "btn" o "ttc"
